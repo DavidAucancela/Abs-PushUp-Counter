@@ -1,0 +1,709 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>rep-counter — instrumento de medición</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --text: #e6edf3; --dim: #8b949e;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    min-height: 100vh; padding: 12px;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  main { display: flex; gap: 12px; flex-wrap: wrap; }
+  #stage { position: relative; flex: 1 1 640px; max-width: 960px; }
+  #overlay { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #000; display: block; }
+  video { display: none; }
+  #panel { flex: 0 0 300px; display: flex; flex-direction: column; gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 8px; }
+  #bigcount { font-size: 64px; font-weight: 700; line-height: 1; text-align: center; }
+  #bigcount .invalid { font-size: 20px; color: var(--dim); font-weight: 400; }
+  #timer { text-align: center; font-size: 24px; color: var(--accent); margin-top: 4px; }
+  .row { display: flex; justify-content: space-between; padding: 2px 0; }
+  .row .v { color: var(--accent); }
+  ul.checks { list-style: none; }
+  ul.checks li { padding: 2px 0; color: var(--bad); }
+  ul.checks li.ok { color: var(--ok); }
+  ul.checks li::before { content: '✗ '; }
+  ul.checks li.ok::before { content: '✓ '; }
+  button {
+    background: var(--accent); color: #0d1117; border: 0; border-radius: 6px;
+    padding: 10px; font: inherit; font-weight: 700; cursor: pointer; width: 100%;
+  }
+  button:disabled { background: var(--line); color: var(--dim); cursor: not-allowed; }
+  button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--line); }
+  select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px; font: inherit;
+  }
+  select:disabled { color: var(--dim); }
+  #avatar3d { width: 100%; height: 160px; display: block; border-radius: 6px; background: #000; }
+  #avatarState { text-align: center; font-size: 12px; color: var(--accent); margin-top: 6px; min-height: 16px; }
+  #hint { color: var(--warn); min-height: 20px; text-align: center; }
+  #replog { max-height: 200px; overflow-y: auto; font-size: 12px; }
+  #replog .rep { padding: 2px 0; }
+  #replog .rep.invalid { color: var(--dim); }
+  #status { color: var(--dim); font-size: 12px; text-align: center; }
+  progress { width: 100%; height: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>rep-counter</h1>
+  <span class="sub">@diacero/rep-counter · spike de precisión · no es un producto</span>
+</header>
+<main>
+  <div id="stage">
+    <video id="video" playsinline></video>
+    <canvas id="overlay" width="960" height="540"></canvas>
+  </div>
+  <div id="panel">
+    <div class="card">
+      <div id="bigcount">0 <span class="invalid" id="invcount"></span></div>
+      <div id="timer">2:00</div>
+      <div id="hint"></div>
+    </div>
+    <div class="card">
+      <h2>Ejercicio</h2>
+      <select id="exsel">
+        <option value="situp">Abdominales</option>
+        <option value="pushup">Flexiones de pecho</option>
+      </select>
+    </div>
+    <div class="card">
+      <h2>Cámara</h2>
+      <select id="camsel"></select>
+    </div>
+    <div class="card" id="avatar3dcard">
+      <h2>Cómo te detecta la cámara</h2>
+      <canvas id="avatar3d" width="280" height="220"></canvas>
+      <div id="avatarState">—</div>
+    </div>
+    <div class="card" id="setupcard">
+      <h2>Encuadre</h2>
+      <ul class="checks">
+        <li id="chk-body">cuerpo completo visible</li>
+        <li id="chk-profile">de perfil al encuadre</li>
+        <li id="chk-light">luz suficiente</li>
+        <li id="chk-stable">encuadre estable</li>
+      </ul>
+    </div>
+    <div class="card" id="calcard" style="display:none">
+      <h2>Calibración</h2>
+      <progress id="calprog" value="0" max="1"></progress>
+      <div class="row"><span>reposo</span><span class="v" id="calrest">—</span></div>
+      <div class="row"><span>umbrales</span><span class="v" id="calth">—</span></div>
+    </div>
+    <div class="card">
+      <h2>Telemetría</h2>
+      <div class="row"><span>fase</span><span class="v" id="tphase">—</span></div>
+      <div class="row"><span>ángulo</span><span class="v" id="tangle">—</span></div>
+      <div class="row"><span>confianza</span><span class="v" id="tconf">—</span></div>
+      <div class="row"><span>fps</span><span class="v" id="tfps">—</span></div>
+    </div>
+    <div class="card" id="logcard" style="display:none">
+      <h2>Reps</h2>
+      <div id="replog"></div>
+    </div>
+    <button id="btn-start" disabled>Iniciar prueba</button>
+    <button id="btn-stop" class="secondary" style="display:none">Detener</button>
+    <button id="btn-export" class="secondary" style="display:none">Exportar sesión (JSON)</button>
+    <button id="btn-again" class="secondary" style="display:none">Otra sesión</button>
+    <div id="status">cargando modelo…</div>
+  </div>
+</main>
+
+<!-- Capa 1: núcleo compilado, inyectado por scripts/build-web.mjs -->
+<script>/*__CORE_BUNDLE__*/</script>
+
+<script type="module">
+import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+const { createRepCounter, Calibrator, calibratedThresholds, ABDOMINALES, FLEXIONES } = window.AbsCounter;
+const EXERCISES = { situp: ABDOMINALES, pushup: FLEXIONES };
+const CALIBRATION_PROMPT = {
+  situp: 'calibrando: quédate acostado, quieto, 3 segundos',
+  pushup: 'calibrando: sostén la plancha con los brazos extendidos, quieto, 3 segundos',
+};
+const CALIBRATION_SPEECH = {
+  situp: 'Acuéstate y no te muevas. Midiendo.',
+  pushup: 'Sostén la plancha con los brazos extendidos. Midiendo.',
+};
+
+// ---- Capa 2: adaptador MediaPipe (BlazePose 33) → PoseFrame (17 puntos) ----
+const MP_MAP = {
+  nose: 0, leftEye: 2, rightEye: 5, leftEar: 7, rightEar: 8,
+  leftShoulder: 11, rightShoulder: 12, leftElbow: 13, rightElbow: 14,
+  leftWrist: 15, rightWrist: 16, leftHip: 23, rightHip: 24,
+  leftKnee: 25, rightKnee: 26, leftAnkle: 27, rightAnkle: 28,
+};
+function toPoseFrame(result, timestamp) {
+  const lm = result.landmarks && result.landmarks[0];
+  if (!lm) return { timestamp, keypoints: {} };
+  const keypoints = {};
+  for (const [name, i] of Object.entries(MP_MAP)) {
+    const p = lm[i];
+    if (p) keypoints[name] = { x: p.x, y: p.y, score: p.visibility ?? 1 };
+  }
+  return { timestamp, keypoints };
+}
+
+// worldLandmarks: mismo orden BlazePose que landmarks, pero en metros, origen en el
+// centro de caderas — sirve solo para el avatar 3D, no reemplaza a toPoseFrame.
+// Signo de y/z invertido como punto de partida (MediaPipe: Y hacia abajo; Three.js: Y
+// hacia arriba) — si el avatar sale espejado/invertido al probar con cámara real, ajustar acá.
+function toWorldPoints(result) {
+  const lm = result.worldLandmarks && result.worldLandmarks[0];
+  if (!lm) return null;
+  const points = {};
+  for (const [name, i] of Object.entries(MP_MAP)) {
+    const p = lm[i];
+    if (p) points[name] = { x: p.x, y: -p.y, z: -p.z, score: p.visibility ?? 1 };
+  }
+  return points;
+}
+
+// ---- Capa 3: host desechable ----
+const $ = (id) => document.getElementById(id);
+const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
+const TEST_MS = 120000;
+const REASON_ES = {
+  shallow_depth: 'recorrido incompleto', no_return: 'no bajó completo',
+  too_fast: 'muy rápida', too_slow: 'muy lenta', arm_assist: 'impulso con brazos',
+  low_confidence: 'visión pobre', feet_lifted: 'pies levantados', hip_sag: 'cadera desalineada',
+};
+
+let landmarker = null;
+let mode = 'loading'; // setup | calibrating | countdown | running | done
+let selectedConfig = ABDOMINALES;
+let counter = null, calibrator = null, thresholds = null;
+let state = null, lastVideoTime = -1;
+let fps = 0, lastLoopT = 0;
+let hipHistory = []; // para el check de estabilidad
+let testStartT = 0, validCount = 0;
+let lastHintSpoken = '';
+
+function speak(text, { interrupt = false } = {}) {
+  try {
+    if (interrupt) speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'es-MX';
+    u.rate = 1.15;
+    speechSynthesis.speak(u);
+  } catch { /* sin voz no se cae el instrumento */ }
+}
+
+async function startStream(deviceId) {
+  if (video.srcObject) video.srcObject.getTracks().forEach((t) => t.stop());
+  const base = { width: { ideal: 1280 }, height: { ideal: 720 } };
+  const constraints = {
+    video: deviceId ? { ...base, deviceId: { exact: deviceId } } : base,
+    audio: false,
+  };
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = stream;
+  await video.play();
+  canvas.width = video.videoWidth || 960;
+  canvas.height = video.videoHeight || 540;
+  lastVideoTime = -1;
+  hipHistory = []; // el check de estabilidad arranca de cero con la cámara nueva
+}
+
+async function refreshCameras() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter(
+    (d) => d.kind === 'videoinput'
+  );
+  const sel = $('camsel');
+  const current = video.srcObject?.getVideoTracks()[0]?.getSettings().deviceId;
+  sel.innerHTML = '';
+  devices.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || `cámara ${i + 1}`;
+    if (d.deviceId === current) o.selected = true;
+    sel.append(o);
+  });
+}
+
+async function init() {
+  try {
+    initAvatar3D();
+  } catch (e) {
+    console.error('avatar 3D deshabilitado (sin WebGL?):', e);
+  }
+  const base = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+  const vision = await FilesetResolver.forVisionTasks(base + '/wasm');
+  landmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+      delegate: 'GPU',
+    },
+    runningMode: 'VIDEO',
+    numPoses: 1,
+  });
+  const saved = localStorage.getItem('absCameraId');
+  try {
+    await startStream(saved || undefined);
+  } catch {
+    await startStream(); // la cámara guardada ya no existe (p.ej. iPhone desconectado)
+  }
+  await refreshCameras();
+  $('camsel').onchange = async () => {
+    localStorage.setItem('absCameraId', $('camsel').value);
+    $('status').textContent = 'cambiando de cámara…';
+    await startStream($('camsel').value);
+    $('status').textContent = 'acomoda la cámara: 2–2.5 m, horizontal, cuerpo de perfil';
+  };
+  // el iPhone puede aparecer/desaparecer en caliente (Continuity Camera)
+  navigator.mediaDevices.addEventListener('devicechange', refreshCameras);
+  mode = 'setup';
+  $('status').textContent = 'acomoda la cámara: 2–2.5 m, horizontal, cuerpo de perfil';
+  requestAnimationFrame(loop);
+}
+
+function loop(t) {
+  requestAnimationFrame(loop);
+  if (!landmarker || video.readyState < 2) return;
+  if (video.currentTime === lastVideoTime) return; // no hay frame nuevo
+  lastVideoTime = video.currentTime;
+
+  if (lastLoopT) fps = fps * 0.9 + (1000 / (t - lastLoopT)) * 0.1;
+  lastLoopT = t;
+
+  const result = landmarker.detectForVideo(video, performance.now());
+  const frame = toPoseFrame(result, performance.now());
+  const world = toWorldPoints(result);
+  const orientation = computeOrientation(frame);
+
+  if (mode === 'setup') runSetupChecks(frame, orientation);
+  else if (mode === 'calibrating') runCalibration(frame);
+  else if (mode === 'running') runCounting(frame);
+
+  updateAvatar3D(world, orientation);
+  draw(frame, orientation);
+  updateTelemetry(frame);
+}
+
+// -- validación de encuadre --
+function kpOk(frame, name) {
+  const k = frame.keypoints[name];
+  return k && k.score > 0.5 && k.x > 0.02 && k.x < 0.98 && k.y > 0.02 && k.y < 0.98;
+}
+
+// Clasifica de qué lado (o si de frente) está el usuario, reutilizando el mismo ratio
+// hombros/torso de siempre. 'ok' = de perfil (cualquier lado), 'almost' = falta girar un
+// poco, 'front' = de frente (no cuenta reps con el motor de ángulos 2D actual).
+function computeOrientation(frame) {
+  const ls = frame.keypoints.leftShoulder, rs = frame.keypoints.rightShoulder;
+  const lh = frame.keypoints.leftHip, rh = frame.keypoints.rightHip;
+  if (!ls || !rs || !lh || !rh) return { status: 'unknown', ratio: null, side: null };
+  const dSh = Math.hypot(ls.x - rs.x, ls.y - rs.y);
+  const torso = (Math.hypot(ls.x - lh.x, ls.y - lh.y) + Math.hypot(rs.x - rh.x, rs.y - rh.y)) / 2;
+  const ratio = torso > 0 ? dSh / torso : 1;
+  // el lado más visible (menos autooculto) es el que el usuario está mostrando a cámara
+  const side = ls.score + lh.score >= rs.score + rh.score ? 'left' : 'right';
+  const status = ratio < 0.4 ? 'ok' : ratio < 0.7 ? 'almost' : 'front';
+  return { status, ratio, side };
+}
+
+function runSetupChecks(frame, orient) {
+  const kps = Object.values(frame.keypoints);
+  const hasNose = kpOk(frame, 'nose');
+  const hasAnkle = kpOk(frame, 'leftAnkle') || kpOk(frame, 'rightAnkle');
+  const body = hasNose && hasAnkle;
+  let bodyMsg = 'cuerpo completo visible';
+  if (!hasNose && !hasAnkle) bodyMsg = 'no te veo — acomódate frente a la cámara';
+  else if (!hasNose) bodyMsg = 'sube o aleja la cámara: no se ve tu cabeza';
+  else if (!hasAnkle) bodyMsg = 'aléjate: no se ven tus pies';
+
+  const profile = orient.status === 'ok';
+  const sideEs = orient.side === 'left' ? 'izquierdo' : 'derecho';
+  let profileMsg = 'de perfil al encuadre';
+  if (orient.status === 'ok') profileMsg = `✓ de perfil (lado ${sideEs})`;
+  else if (orient.status === 'almost') profileMsg = `girá un poco más de perfil (${sideEs})`;
+  else if (orient.status === 'front') profileMsg = 'de frente no cuenta — girate de costado (izq. o der.)';
+  else profileMsg = 'no se ve bien el torso';
+
+  const avgScore = kps.length ? kps.reduce((s, k) => s + k.score, 0) / kps.length : 0;
+  const light = kps.length >= 12 && avgScore > 0.6;
+  let lightMsg = 'luz suficiente';
+  if (kps.length < 12) lightMsg = 'acércate — faltan puntos por detectar';
+  else if (avgScore <= 0.6) lightMsg = `mejora la luz (${(avgScore * 100).toFixed(0)}%)`;
+
+  let stable = false;
+  let stableMsg = 'midiendo estabilidad…';
+  const lh = frame.keypoints.leftHip, rh = frame.keypoints.rightHip;
+  if (lh && rh) {
+    const now = performance.now();
+    hipHistory.push({ t: now, x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 });
+    hipHistory = hipHistory.filter((h) => now - h.t < 2000);
+    if (hipHistory.length > 20 && now - hipHistory[0].t > 1800) {
+      const xs = hipHistory.map((h) => h.x), ys = hipHistory.map((h) => h.y);
+      const jitter = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+      stable = jitter < 0.02;
+      stableMsg = stable ? 'encuadre estable' : 'quédate quieto un momento más';
+    }
+  }
+
+  setCheck('chk-body', body, bodyMsg);
+  setCheck('chk-profile', profile, profileMsg);
+  setCheck('chk-light', light, lightMsg);
+  setCheck('chk-stable', stable, stableMsg);
+  $('btn-start').disabled = !(body && profile && light && stable);
+}
+function setCheck(id, ok, msg) {
+  const el = $(id);
+  el.classList.toggle('ok', !!ok);
+  if (msg) el.textContent = msg;
+}
+
+// -- calibración de 3 s --
+function runCalibration(frame) {
+  const st = calibrator.push(frame);
+  $('calprog').value = st.progress;
+  if (!st.tracking) $('status').textContent = 'no te veo bien — quédate en posición';
+  else if (st.progress >= 1 && !st.done) $('status').textContent = 'medición inestable — quédate quieto un poco más';
+  if (st.done) {
+    thresholds = calibratedThresholds(st.restAngle, selectedConfig);
+    $('calrest').textContent = st.restAngle.toFixed(0) + '°';
+    $('calth').textContent = `down ${thresholds.down.toFixed(0)}° / up ${thresholds.up.toFixed(0)}°`;
+    startCountdown();
+  }
+}
+
+function startCountdown() {
+  mode = 'countdown';
+  $('status').textContent = 'prepárate…';
+  let n = 3;
+  speak(String(n), { interrupt: true });
+  const iv = setInterval(() => {
+    n--;
+    if (n > 0) speak(String(n));
+    else {
+      clearInterval(iv);
+      speak('¡Vamos!');
+      startTest();
+    }
+  }, 1000);
+}
+
+function startTest() {
+  counter = createRepCounter({ ...selectedConfig, thresholds });
+  validCount = 0;
+  counter.onRep((e) => {
+    if (e.valid) {
+      validCount++;
+      speak(String(validCount), { interrupt: true });
+    } else {
+      speak('no cuenta');
+    }
+    const div = document.createElement('div');
+    div.className = 'rep' + (e.valid ? '' : ' invalid');
+    div.textContent = e.valid
+      ? `#${e.index} válida · ${(e.durationMs / 1000).toFixed(1)}s · pico ${e.peakAngle.toFixed(0)}°`
+      : `#${e.index} inválida · ${REASON_ES[e.reason] ?? e.reason}`;
+    $('replog').prepend(div);
+  });
+  mode = 'running';
+  testStartT = performance.now();
+  $('logcard').style.display = '';
+  $('btn-stop').style.display = '';
+  $('status').textContent = 'contando — no mires la pantalla';
+}
+
+function runCounting(frame) {
+  state = counter.push(frame);
+  const left = Math.max(0, TEST_MS - (performance.now() - testStartT));
+  const m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
+  $('timer').textContent = `${m}:${String(s).padStart(2, '0')}`;
+  $('bigcount').firstChild.textContent = state.validReps + ' ';
+  $('invcount').textContent = state.invalidReps ? `(+${state.invalidReps} inválidas)` : '';
+  $('hint').textContent = state.formHint ?? '';
+  if (state.formHint && state.formHint !== lastHintSpoken) {
+    lastHintSpoken = state.formHint;
+  }
+  if (left <= 0) finishTest('¡Tiempo!');
+}
+
+function finishTest(msg) {
+  mode = 'done';
+  speak(msg + ' ' + (state?.validReps ?? 0) + ' repeticiones válidas.', { interrupt: true });
+  $('btn-stop').style.display = 'none';
+  $('btn-export').style.display = '';
+  $('btn-again').style.display = '';
+  $('status').textContent =
+    `fin — ${state?.validReps ?? 0} válidas, ${state?.invalidReps ?? 0} inválidas. Exporta el log para el dataset.`;
+}
+
+// -- overlay --
+const BONES = [
+  ['leftShoulder', 'leftElbow'], ['leftElbow', 'leftWrist'],
+  ['rightShoulder', 'rightElbow'], ['rightElbow', 'rightWrist'],
+  ['leftShoulder', 'leftHip'], ['leftHip', 'leftKnee'], ['leftKnee', 'leftAnkle'],
+  ['rightShoulder', 'rightHip'], ['rightHip', 'rightKnee'], ['rightKnee', 'rightAnkle'],
+  ['leftShoulder', 'rightShoulder'], ['leftHip', 'rightHip'],
+];
+const PHASE_COLOR = { IDLE: '#8b949e', DOWN: '#3fb950', RISING: '#d29922', UP: '#58a6ff', LOWERING: '#d29922' };
+
+// -- avatar 3D (Three.js) — replica en vivo la pose usando worldLandmarks --
+const JOINT_ORDER = Object.keys(MP_MAP);
+const BONE_INDEX = BONES.map(([a, b]) => [JOINT_ORDER.indexOf(a), JOINT_ORDER.indexOf(b)]);
+let scene3d = null, camera3d = null, renderer3d = null, boneLines3d = null, jointMesh3d = null;
+const _m4 = new THREE.Matrix4();
+
+function initAvatar3D() {
+  const el = $('avatar3d');
+  scene3d = new THREE.Scene();
+  scene3d.background = new THREE.Color(0x0d1117);
+  camera3d = new THREE.PerspectiveCamera(45, el.width / el.height, 0.05, 10);
+  camera3d.position.set(1.3, 0.9, 1.3);
+  camera3d.lookAt(0, 0, 0);
+  renderer3d = new THREE.WebGLRenderer({ canvas: el, antialias: true });
+  renderer3d.setSize(el.width, el.height, false);
+  scene3d.add(new THREE.AmbientLight(0xffffff, 1));
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(BONE_INDEX.length * 2 * 3), 3));
+  boneLines3d = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x58a6ff }));
+  scene3d.add(boneLines3d);
+
+  jointMesh3d = new THREE.InstancedMesh(
+    new THREE.SphereGeometry(0.025, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0xe6edf3 }),
+    JOINT_ORDER.length
+  );
+  scene3d.add(jointMesh3d);
+}
+
+function updateAvatar3D(world, orientation) {
+  if (!scene3d) return;
+  if (world) {
+    const pos = boneLines3d.geometry.attributes.position;
+    let vi = 0;
+    for (const [ia, ib] of BONE_INDEX) {
+      const a = world[JOINT_ORDER[ia]], b = world[JOINT_ORDER[ib]];
+      if (a && b) {
+        pos.setXYZ(vi++, a.x, a.y, a.z);
+        pos.setXYZ(vi++, b.x, b.y, b.z);
+      } else {
+        pos.setXYZ(vi++, 0, 0, 0);
+        pos.setXYZ(vi++, 0, 0, 0);
+      }
+    }
+    pos.needsUpdate = true;
+    JOINT_ORDER.forEach((name, i) => {
+      const p = world[name];
+      _m4.makeTranslation(p ? p.x : 0, p ? p.y : 0, p ? p.z : 0);
+      jointMesh3d.setMatrixAt(i, _m4);
+    });
+    jointMesh3d.instanceMatrix.needsUpdate = true;
+  }
+  renderer3d.render(scene3d, camera3d);
+
+  const label = $('avatarState');
+  if (!orientation || orientation.status === 'unknown') label.textContent = 'posicionate frente a la cámara';
+  else if (orientation.status === 'ok') label.textContent = `✓ perfil ${orientation.side === 'left' ? 'izquierdo' : 'derecho'}`;
+  else if (orientation.status === 'almost') label.textContent = `girá un poco más (${orientation.side === 'left' ? 'izq' : 'der'})`;
+  else label.textContent = 'de frente — no cuenta, girate';
+}
+
+// -- pose de referencia (fantasma) — el trío medido se coloca geométricamente exacto con
+// cfg.angle/cfg.thresholds.down; el resto del esqueleto son proporciones fijas aproximadas,
+// pensadas a ojo para dar una silueta plausible, no para validar contra el motor de conteo.
+const LIMB = { torso: 1, upperArm: 0.5, forearm: 0.46, thigh: 0.6, shin: 0.56 };
+function rotateVec(v, deg) {
+  const r = (deg * Math.PI) / 180;
+  return { x: v.x * Math.cos(r) - v.y * Math.sin(r), y: v.x * Math.sin(r) + v.y * Math.cos(r) };
+}
+function extend(from, dir, len) { return { x: from.x + dir.x * len, y: from.y + dir.y * len }; }
+
+function buildReferencePose(cfg) {
+  if (cfg.id === 'pushup') {
+    const shoulder = { x: 0, y: 0 };
+    const dirArmDown = { x: 0.15, y: 0.99 }; // hombro→codo, casi vertical hacia el piso
+    const elbow = extend(shoulder, dirArmDown, LIMB.upperArm);
+    const dirWrist = rotateVec({ x: -dirArmDown.x, y: -dirArmDown.y }, cfg.thresholds.down);
+    const wrist = extend(elbow, dirWrist, LIMB.forearm);
+    const dirTorso = { x: 1, y: 0 }; // hombro→cadera, cuerpo horizontal (plancha)
+    const hip = extend(shoulder, dirTorso, LIMB.torso);
+    const knee = extend(hip, dirTorso, LIMB.thigh);
+    const ankle = extend(knee, dirTorso, LIMB.shin);
+    const nose = extend(shoulder, { x: -0.9, y: -0.25 }, 0.3);
+    return { shoulder, elbow, wrist, hip, knee, ankle, nose };
+  }
+  // situp
+  const hip = { x: 0, y: 0 };
+  const shoulder = extend(hip, { x: -1, y: 0 }, LIMB.torso); // cadera→hombro, acostado horizontal
+  const dirKnee = rotateVec({ x: -1, y: 0 }, cfg.thresholds.down);
+  const knee = extend(hip, dirKnee, LIMB.thigh);
+  const ankle = extend(knee, { x: 0.35, y: 0.55 }, LIMB.shin); // pie apoyado en el piso
+  const elbow = extend(shoulder, { x: 0.15, y: 0.4 }, LIMB.upperArm * 0.7);
+  const wrist = extend(elbow, { x: 0.2, y: -0.1 }, LIMB.forearm * 0.7);
+  const nose = extend(shoulder, { x: -0.9, y: -0.25 }, 0.3);
+  return { shoulder, elbow, wrist, hip, knee, ankle, nose };
+}
+
+function sidedName(side, joint) {
+  return joint === 'nose' ? 'nose' : side + joint[0].toUpperCase() + joint.slice(1);
+}
+
+// Escala isotrópica en píxeles (no en 0..1 directo, para no distorsionar con el aspect
+// ratio del canvas): el torso ocupa ~32% del alto, centrado — heurística de "distancia
+// ideal" sin calibración de intrínsecos de cámara, a ajustar viendo la app en vivo.
+function projectGhost(pose, side) {
+  const targetTorsoPx = canvas.height * 0.32;
+  const cx = canvas.width * 0.5, cy = canvas.height * 0.55;
+  const out = {};
+  for (const [joint, local] of Object.entries(pose)) {
+    out[sidedName(side, joint)] = {
+      x: (cx + local.x * targetTorsoPx) / canvas.width,
+      y: (cy + local.y * targetTorsoPx) / canvas.height,
+      score: 1,
+    };
+  }
+  return out;
+}
+
+function drawRotateIcon() {
+  const cx = canvas.width * 0.5, cy = canvas.height * 0.5, r = Math.min(canvas.width, canvas.height) * 0.12;
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  ctx.strokeStyle = '#58a6ff';
+  ctx.lineWidth = 4;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0.4, Math.PI * 1.6);
+  ctx.stroke();
+  const arrow = (angle) => {
+    const x = cx + r * Math.cos(angle), y = cy + r * Math.sin(angle);
+    ctx.beginPath();
+    ctx.moveTo(x - 8, y - 8);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x - 8, y + 8);
+    ctx.stroke();
+  };
+  arrow(0.4);
+  arrow(Math.PI * 1.6);
+  ctx.restore();
+}
+
+function drawSkeleton(points, { color, dashed = false, alpha = 1 } = {}) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.setLineDash(dashed ? [6, 4] : []);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = color;
+  for (const [a, b] of BONES) {
+    const ka = points[a], kb = points[b];
+    if (!ka || !kb || (ka.score ?? 1) < 0.5 || (kb.score ?? 1) < 0.5) continue;
+    ctx.beginPath();
+    ctx.moveTo(ka.x * canvas.width, ka.y * canvas.height);
+    ctx.lineTo(kb.x * canvas.width, kb.y * canvas.height);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function draw(frame, orientation) {
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  if (mode === 'setup' || mode === 'calibrating') {
+    if (orientation && (orientation.status === 'ok' || orientation.status === 'almost')) {
+      drawSkeleton(projectGhost(buildReferencePose(selectedConfig), orientation.side), {
+        color: '#58a6ff', dashed: true, alpha: 0.4,
+      });
+    } else if (orientation && orientation.status === 'front') {
+      drawRotateIcon();
+    }
+  }
+
+  const col = PHASE_COLOR[state?.phase ?? 'IDLE'];
+  drawSkeleton(frame.keypoints, { color: col });
+  for (const k of Object.values(frame.keypoints)) {
+    if (k.score < 0.5) continue;
+    ctx.fillStyle = '#e6edf3';
+    ctx.beginPath();
+    ctx.arc(k.x * canvas.width, k.y * canvas.height, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // barra de ángulo con umbrales (instrumento, no adorno)
+  if (state && thresholds) {
+    const x = 20, y0 = 40, h = canvas.height - 80, min = 40, max = 180;
+    const yFor = (deg) => y0 + h * (1 - (deg - min) / (max - min));
+    ctx.fillStyle = 'rgba(22,27,34,.8)';
+    ctx.fillRect(x - 8, y0 - 10, 46, h + 20);
+    ctx.strokeStyle = '#30363d';
+    ctx.strokeRect(x, y0, 10, h);
+    ctx.fillStyle = '#3fb950';
+    ctx.fillRect(x - 4, yFor(thresholds.down), 18, 2);
+    ctx.fillStyle = '#58a6ff';
+    ctx.fillRect(x - 4, yFor(thresholds.up), 18, 2);
+    ctx.fillStyle = col;
+    const ya = yFor(Math.min(max, Math.max(min, state.currentAngle)));
+    ctx.fillRect(x, ya - 3, 10, 6);
+    ctx.fillStyle = '#e6edf3';
+    ctx.font = '12px ui-monospace';
+    ctx.fillText(state.currentAngle.toFixed(0) + '°', x + 16, ya + 4);
+  }
+}
+
+function updateTelemetry(frame) {
+  $('tphase').textContent = state?.phase ?? mode;
+  $('tangle').textContent = state ? state.currentAngle.toFixed(1) + '°' : '—';
+  $('tconf').textContent = state ? (state.confidence * 100).toFixed(0) + '%' : '—';
+  $('tfps').textContent = fps.toFixed(0);
+  $('tfps').style.color = fps < 15 ? 'var(--bad)' : '';
+}
+
+// -- botones --
+$('exsel').onchange = () => {
+  selectedConfig = EXERCISES[$('exsel').value];
+};
+$('btn-start').onclick = () => {
+  mode = 'calibrating';
+  $('camsel').disabled = true; // cambiar de cámara a mitad de prueba rompe el tracking
+  $('exsel').disabled = true;
+  calibrator = new Calibrator(selectedConfig);
+  $('setupcard').style.display = 'none';
+  $('calcard').style.display = '';
+  $('btn-start').style.display = 'none';
+  $('status').textContent = CALIBRATION_PROMPT[selectedConfig.id] ?? 'calibrando…';
+  speak(CALIBRATION_SPEECH[selectedConfig.id] ?? 'No te muevas. Midiendo.', { interrupt: true });
+};
+$('btn-stop').onclick = () => finishTest('Detenido.');
+$('btn-export').onclick = () => {
+  const payload = {
+    name: selectedConfig.id + '-' + new Date().toISOString().replace(/[:.]/g, '-'),
+    recordedAt: new Date().toISOString(),
+    // Rellenar a mano tras contar el video de referencia:
+    human: { validReps: null, cheatReps: null },
+    log: counter.export(),
+  };
+  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = payload.name + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$('btn-again').onclick = () => location.reload();
+
+init().catch((err) => {
+  $('status').textContent = 'error: ' + err.message;
+  console.error(err);
+});
+</script>
+</body>
+</html>

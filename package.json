@@ -1,0 +1,22 @@
+{
+  "name": "@diacero/rep-counter",
+  "version": "0.1.0",
+  "description": "Contador de repeticiones por visión — núcleo portable (Capa 1) + app web de prueba para abdominales",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/build-web.mjs",
+    "test": "tsc -p tsconfig.json && node --test 'dist/test/*.test.js'",
+    "eval": "node eval/evaluate.mjs"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  },
+  "allowScripts": {
+    "esbuild@0.23.1": true
+  }
+}
