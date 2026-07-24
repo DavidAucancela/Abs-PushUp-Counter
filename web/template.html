@@ -246,8 +246,10 @@ async function init() {
   const vision = await FilesetResolver.forVisionTasks(base + '/wasm');
   landmarker = await PoseLandmarker.createFromOptions(vision, {
     baseOptions: {
+      // Heavy en vez de Lite — diagnóstico temporal para ver si las "alucinaciones" en
+      // flexiones son capacidad del modelo o el ángulo/oclusión de cámara (más lento, cuesta fps).
       modelAssetPath:
-        'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+        'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task',
       delegate: 'GPU',
     },
     runningMode: 'VIDEO',
@@ -286,13 +288,14 @@ function loop(t) {
   const frame = toPoseFrame(result, performance.now());
   const world = toWorldPoints(result);
   const orientation = computeOrientation(frame);
+  const guidePose = buildReferencePose(selectedConfig, guideAngle(selectedConfig, performance.now()));
 
   if (mode === 'setup') runSetupChecks(frame, orientation);
   else if (mode === 'calibrating') runCalibration(frame);
   else if (mode === 'running') runCounting(frame);
 
-  updateAvatar3D(world, orientation);
-  draw(frame, orientation);
+  updateAvatar3D(world, orientation, guidePose);
+  draw(frame, orientation, guidePose);
   updateTelemetry(frame);
 }
 
@@ -461,15 +464,25 @@ const PHASE_COLOR = { IDLE: '#8b949e', DOWN: '#3fb950', RISING: '#d29922', UP: '
 const JOINT_ORDER = Object.keys(MP_MAP);
 const BONE_INDEX = BONES.map(([a, b]) => [JOINT_ORDER.indexOf(a), JOINT_ORDER.indexOf(b)]);
 let scene3d = null, camera3d = null, renderer3d = null, boneLines3d = null, jointMesh3d = null;
+let guideLines3d = null;
 const _m4 = new THREE.Matrix4();
+
+// Esqueleto reducido (sin lado) para dibujar la guía animada junto al avatar en vivo.
+const GUIDE_BONES = [
+  ['shoulder', 'elbow'], ['elbow', 'wrist'],
+  ['shoulder', 'hip'], ['hip', 'knee'], ['knee', 'ankle'],
+  ['nose', 'shoulder'],
+];
+const GUIDE_SCALE = 0.5;   // metros por unidad local (torso≈1) — escala aprox. de un torso real
+const GUIDE_OFFSET_X = 0.7; // separa la guía del avatar en vivo para poder ver ambos a la vez
 
 function initAvatar3D() {
   const el = $('avatar3d');
   scene3d = new THREE.Scene();
   scene3d.background = new THREE.Color(0x0d1117);
   camera3d = new THREE.PerspectiveCamera(45, el.width / el.height, 0.05, 10);
-  camera3d.position.set(1.3, 0.9, 1.3);
-  camera3d.lookAt(0, 0, 0);
+  camera3d.position.set(1.6, 0.9, 1.6);
+  camera3d.lookAt(0.35, 0, 0);
   renderer3d = new THREE.WebGLRenderer({ canvas: el, antialias: true });
   renderer3d.setSize(el.width, el.height, false);
   scene3d.add(new THREE.AmbientLight(0xffffff, 1));
@@ -485,9 +498,30 @@ function initAvatar3D() {
     JOINT_ORDER.length
   );
   scene3d.add(jointMesh3d);
+
+  const guideGeo = new THREE.BufferGeometry();
+  guideGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(GUIDE_BONES.length * 2 * 3), 3));
+  guideLines3d = new THREE.LineSegments(
+    guideGeo,
+    new THREE.LineBasicMaterial({ color: 0x3fb950, transparent: true, opacity: 0.6 })
+  );
+  scene3d.add(guideLines3d);
 }
 
-function updateAvatar3D(world, orientation) {
+function updateGuideSkeleton(guidePose) {
+  if (!guideLines3d || !guidePose) return;
+  const pos = guideLines3d.geometry.attributes.position;
+  let vi = 0;
+  const conv = (p) => ({ x: p.x * GUIDE_SCALE + GUIDE_OFFSET_X, y: -p.y * GUIDE_SCALE, z: 0 });
+  for (const [a, b] of GUIDE_BONES) {
+    const A = conv(guidePose[a]), B = conv(guidePose[b]);
+    pos.setXYZ(vi++, A.x, A.y, A.z);
+    pos.setXYZ(vi++, B.x, B.y, B.z);
+  }
+  pos.needsUpdate = true;
+}
+
+function updateAvatar3D(world, orientation, guidePose) {
   if (!scene3d) return;
   if (world) {
     const pos = boneLines3d.geometry.attributes.position;
@@ -510,31 +544,46 @@ function updateAvatar3D(world, orientation) {
     });
     jointMesh3d.instanceMatrix.needsUpdate = true;
   }
+
+  guideLines3d.visible = GUIDE_MODES.has(mode);
+  if (guideLines3d.visible) updateGuideSkeleton(guidePose);
+
   renderer3d.render(scene3d, camera3d);
 
   const label = $('avatarState');
   if (!orientation || orientation.status === 'unknown') label.textContent = 'posicionate frente a la cámara';
-  else if (orientation.status === 'ok') label.textContent = `✓ perfil ${orientation.side === 'left' ? 'izquierdo' : 'derecho'}`;
+  else if (orientation.status === 'ok') label.textContent = `✓ perfil ${orientation.side === 'left' ? 'izquierdo' : 'derecho'} — seguí el ritmo verde`;
   else if (orientation.status === 'almost') label.textContent = `girá un poco más (${orientation.side === 'left' ? 'izq' : 'der'})`;
   else label.textContent = 'de frente — no cuenta, girate';
 }
 
-// -- pose de referencia (fantasma) — el trío medido se coloca geométricamente exacto con
-// cfg.angle/cfg.thresholds.down; el resto del esqueleto son proporciones fijas aproximadas,
+// -- pose de referencia (guía) — el trío medido se coloca geométricamente exacto en el
+// ángulo pedido (angleDeg); el resto del esqueleto son proporciones fijas aproximadas,
 // pensadas a ojo para dar una silueta plausible, no para validar contra el motor de conteo.
 const LIMB = { torso: 1, upperArm: 0.5, forearm: 0.46, thigh: 0.6, shin: 0.56 };
+// Ritmo del ejemplo animado: oscila down↔up en este período — deliberadamente más lento que
+// repDurationMs.min de cualquier ejercicio (no debe parecer "too_fast") y mucho más rápido
+// que el máximo (no debe parecer perezoso). No liga con el ritmo real del usuario, es un
+// metrónomo visual fijo.
+const GUIDE_PERIOD_MS = 2400;
+function guideAngle(cfg, tMs) {
+  const phase = (tMs % GUIDE_PERIOD_MS) / GUIDE_PERIOD_MS;
+  const f = 0.5 * (1 - Math.cos(2 * Math.PI * phase)); // 0→1→0 suave (down→up→down)
+  const { down, up } = cfg.thresholds;
+  return down + (up - down) * f;
+}
 function rotateVec(v, deg) {
   const r = (deg * Math.PI) / 180;
   return { x: v.x * Math.cos(r) - v.y * Math.sin(r), y: v.x * Math.sin(r) + v.y * Math.cos(r) };
 }
 function extend(from, dir, len) { return { x: from.x + dir.x * len, y: from.y + dir.y * len }; }
 
-function buildReferencePose(cfg) {
+function buildReferencePose(cfg, angleDeg) {
   if (cfg.id === 'pushup') {
     const shoulder = { x: 0, y: 0 };
     const dirArmDown = { x: 0.15, y: 0.99 }; // hombro→codo, casi vertical hacia el piso
     const elbow = extend(shoulder, dirArmDown, LIMB.upperArm);
-    const dirWrist = rotateVec({ x: -dirArmDown.x, y: -dirArmDown.y }, cfg.thresholds.down);
+    const dirWrist = rotateVec({ x: -dirArmDown.x, y: -dirArmDown.y }, angleDeg);
     const wrist = extend(elbow, dirWrist, LIMB.forearm);
     const dirTorso = { x: 1, y: 0 }; // hombro→cadera, cuerpo horizontal (plancha)
     const hip = extend(shoulder, dirTorso, LIMB.torso);
@@ -546,7 +595,7 @@ function buildReferencePose(cfg) {
   // situp
   const hip = { x: 0, y: 0 };
   const shoulder = extend(hip, { x: -1, y: 0 }, LIMB.torso); // cadera→hombro, acostado horizontal
-  const dirKnee = rotateVec({ x: -1, y: 0 }, cfg.thresholds.down);
+  const dirKnee = rotateVec({ x: -1, y: 0 }, angleDeg);
   const knee = extend(hip, dirKnee, LIMB.thigh);
   const ankle = extend(knee, { x: 0.35, y: 0.55 }, LIMB.shin); // pie apoyado en el piso
   const elbow = extend(shoulder, { x: 0.15, y: 0.4 }, LIMB.upperArm * 0.7);
@@ -616,15 +665,20 @@ function drawSkeleton(points, { color, dashed = false, alpha = 1 } = {}) {
   ctx.restore();
 }
 
-function draw(frame, orientation) {
+// La guía se muestra durante todo el flujo previo y activo del ejercicio, no solo al armar
+// el encuadre — sirve de metrónomo visual de ritmo/profundidad mientras se cuenta.
+const GUIDE_MODES = new Set(['setup', 'calibrating', 'countdown', 'running']);
+
+function draw(frame, orientation, guidePose) {
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-  if (mode === 'setup' || mode === 'calibrating') {
-    if (orientation && (orientation.status === 'ok' || orientation.status === 'almost')) {
-      drawSkeleton(projectGhost(buildReferencePose(selectedConfig), orientation.side), {
-        color: '#58a6ff', dashed: true, alpha: 0.4,
+  if (GUIDE_MODES.has(mode)) {
+    if (orientation && (orientation.status === 'ok' || orientation.status === 'almost') && guidePose) {
+      drawSkeleton(projectGhost(guidePose, orientation.side), {
+        color: '#58a6ff', dashed: true, alpha: mode === 'running' ? 0.3 : 0.4,
       });
-    } else if (orientation && orientation.status === 'front') {
+    } else if (mode !== 'running' && orientation && orientation.status === 'front') {
+      // durante el conteo activo no tiene sentido mostrar "girate": el set ya arrancó.
       drawRotateIcon();
     }
   }
