@@ -1,4 +1,6 @@
 node_modules/
 dist/
 sessions/
+resultados/
 *.log
+.DS_Store
